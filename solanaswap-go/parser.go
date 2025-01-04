@@ -39,6 +39,10 @@ func NewTransactionParser(tx *rpc.GetTransactionResult) (*Parser, error) {
 	return _init(txInfo, tx.Meta)
 }
 
+func NewSwapParser(txInfo *solana.Transaction, meta *rpc.TransactionMeta) (*Parser, error) {
+	return _init(txInfo, meta)
+}
+
 func _init(txInfo *solana.Transaction, meta *rpc.TransactionMeta) (*Parser, error) {
 	allAccountKeys := append(txInfo.Message.AccountKeys, meta.LoadedAddresses.Writable...)
 	allAccountKeys = append(allAccountKeys, meta.LoadedAddresses.ReadOnly...)
