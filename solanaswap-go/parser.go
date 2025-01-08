@@ -268,6 +268,142 @@ func (p *Parser) ProcessSwapData(swapDatas []SwapData) (*SwapInfo, error) {
 	return swapInfo, nil
 }
 
+type TokenData struct {
+	mint     solana.PublicKey
+	amount   uint64
+	decimals uint8
+}
+
+func (p *Parser) ProcessAggregatedSwapData(swapDatas []SwapData) (*SwapInfo, error) {
+	// 检查是否都不属于需要特殊处理的类型
+	needSpecialProcess := false
+	for _, swapData := range swapDatas {
+		if swapData.Type == METEORA || swapData.Type == RAYDIUM ||
+			swapData.Type == ORCA || swapData.Type == MOONSHOT {
+			needSpecialProcess = true
+			break
+		}
+	}
+
+	if !needSpecialProcess {
+		return p.ProcessSwapData(swapDatas)
+	}
+
+	txInfo := p.txInfo
+	swapInfo := &SwapInfo{
+		Signers:    txInfo.Message.Signers(),
+		Signatures: txInfo.Signatures,
+	}
+
+	inputs := make(map[string]TokenData)
+	outputs := make(map[string]TokenData)
+
+	// 处理所有交易
+	for i := 0; i < len(swapDatas); i++ {
+		swapData := swapDatas[i]
+
+		switch swapData.Type {
+		case MOONSHOT:
+			data := swapData.Data.(*MoonshotTradeInstructionWithMint)
+			if data.TradeType == TradeTypeBuy {
+				// SOL => Token
+				addToMap(inputs, TokenData{
+					mint:     NATIVE_SOL_MINT_PROGRAM_ID,
+					amount:   data.CollateralAmount,
+					decimals: 9,
+				})
+				addToMap(outputs, TokenData{
+					mint:     data.Mint,
+					amount:   data.TokenAmount,
+					decimals: 9,
+				})
+			} else {
+				// Token => SOL
+				addToMap(inputs, TokenData{
+					mint:     data.Mint,
+					amount:   data.TokenAmount,
+					decimals: 9,
+				})
+				addToMap(outputs, TokenData{
+					mint:     NATIVE_SOL_MINT_PROGRAM_ID,
+					amount:   data.CollateralAmount,
+					decimals: 9,
+				})
+			}
+		case METEORA, RAYDIUM, ORCA:
+			var tokenData TokenData
+			switch data := swapData.Data.(type) {
+			case *TransferData:
+				tokenData = TokenData{
+					mint:     solana.MustPublicKeyFromBase58(data.Mint),
+					amount:   data.Info.Amount,
+					decimals: data.Decimals,
+				}
+			case *TransferCheck:
+				amount := uint64(0)
+				if i%2 == 0 { // 偶数位置为输入
+					parsedAmount, _ := strconv.ParseInt(data.Info.TokenAmount.Amount, 10, 64)
+					amount = uint64(parsedAmount)
+				} else { // 奇数位置为输出
+					parsedAmount, _ := strconv.ParseFloat(data.Info.TokenAmount.Amount, 64)
+					amount = uint64(parsedAmount)
+				}
+				tokenData = TokenData{
+					mint:     solana.MustPublicKeyFromBase58(data.Info.Mint),
+					amount:   amount,
+					decimals: data.Info.TokenAmount.Decimals,
+				}
+			}
+
+			// 根据位置判断是输入还是输出
+			if i%2 == 0 {
+				addToMap(inputs, tokenData)
+			} else {
+				addToMap(outputs, tokenData)
+			}
+		}
+
+		swapInfo.AMMs = append(swapInfo.AMMs, string(swapData.Type))
+	}
+
+	// 移除同时在输入和输出的代币
+	for mintStr := range inputs {
+		if _, exists := outputs[mintStr]; exists {
+			delete(inputs, mintStr)
+			delete(outputs, mintStr)
+		}
+	}
+
+	// 设置最终的输入输出
+	// 注意：可能会有多个输入和输出，这里只保留最早的输入和最后的输出
+	for _, input := range inputs {
+		swapInfo.TokenInMint = input.mint
+		swapInfo.TokenInAmount = input.amount
+		swapInfo.TokenInDecimals = input.decimals
+		break // 只取第一个输入
+	}
+
+	for _, output := range outputs {
+		swapInfo.TokenOutMint = output.mint
+		swapInfo.TokenOutAmount = output.amount
+		swapInfo.TokenOutDecimals = output.decimals
+		// 不 break，让最后一个输出覆盖前面的
+	}
+
+	return swapInfo, nil
+}
+
+// 辅助函数：添加到 map 并累加金额
+func addToMap(m map[string]TokenData, data TokenData) {
+	mintStr := data.mint.String()
+	if existing, exists := m[mintStr]; exists {
+		existing.amount += data.amount
+		m[mintStr] = existing
+	} else {
+		m[mintStr] = data
+	}
+}
+
 func (p *Parser) processTradingBotSwaps(instructionIndex int) []SwapData {
 	var swaps []SwapData
 
